@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -43,8 +43,12 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include<stdlib.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #ifdef _ANDROID_
   #include <binder/MemoryHeapBase.h>
+#ifdef _ANDROID_ICS_
+  #include "QComOMXMetadata.h"
+#endif
 #endif // _ANDROID_
 #include <pthread.h>
 #include <semaphore.h>
@@ -53,7 +57,10 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "OMX_QCOMExtns.h"
 #include "qc_omx_component.h"
 #include "omx_video_common.h"
-
+#include "extra_data_handler.h"
+#include <linux/videodev2.h>
+#include <dlfcn.h>
+#include "C2DColorConverter.h"
 
 #ifdef _ANDROID_
 using namespace android;
@@ -66,23 +73,42 @@ public:
 };
 
 #include <utils/Log.h>
-//#define LOG_TAG "OMX-VENC-720p"
+#define LOG_TAG "OMX-VENC-720p"
 #ifdef ENABLE_DEBUG_LOW
-#define DEBUG_PRINT_LOW LOGE
+#define DEBUG_PRINT_LOW ALOGV
 #else
 #define DEBUG_PRINT_LOW
 #endif
 #ifdef ENABLE_DEBUG_HIGH
-#define DEBUG_PRINT_HIGH LOGE
+#define DEBUG_PRINT_HIGH  ALOGV
 #else
 #define DEBUG_PRINT_HIGH
 #endif
 #ifdef ENABLE_DEBUG_ERROR
-#define DEBUG_PRINT_ERROR LOGE
+#define DEBUG_PRINT_ERROR ALOGE
 #else
 #define DEBUG_PRINT_ERROR
 #endif
+
+#else //_ANDROID_
+#define DEBUG_PRINT_LOW
+#define DEBUG_PRINT_HIGH
+#define DEBUG_PRINT_ERROR
 #endif // _ANDROID_
+
+#ifdef USE_ION
+    static const char* MEM_DEVICE = "/dev/ion";
+    #define MEM_HEAP_ID ION_CP_MM_HEAP_ID
+#elif MAX_RES_720P
+static const char* MEM_DEVICE = "/dev/pmem_adsp";
+#elif MAX_RES_1080P_EBI
+static const char* MEM_DEVICE  = "/dev/pmem_adsp";
+#elif MAX_RES_1080P
+static const char* MEM_DEVICE = "/dev/pmem_smipool";
+#else
+#error MEM_DEVICE cannot be determined.
+#endif
+
 //////////////////////////////////////////////////////////////////////////////
 //                       Module specific globals
 //////////////////////////////////////////////////////////////////////////////
@@ -116,12 +142,46 @@ public:
         & BITMASK_FLAG(mIndex))
 #define BITMASK_ABSENT(mArray,mIndex) (((mArray)[BITMASK_OFFSET(mIndex)] \
         & BITMASK_FLAG(mIndex)) == 0x0)
-
+#ifdef _ANDROID_ICS_
+#define MAX_NUM_INPUT_BUFFERS 32
+#endif
 void* message_thread(void *);
 // OMX video class
 class omx_video: public qc_omx_component
 {
-
+protected:
+#ifdef _ANDROID_ICS_
+  bool meta_mode_enable;
+  bool c2d_opened;
+  encoder_media_buffer_type meta_buffers[MAX_NUM_INPUT_BUFFERS];
+  OMX_BUFFERHEADERTYPE *opaque_buffer_hdr[MAX_NUM_INPUT_BUFFERS];
+  bool mUseProxyColorFormat;
+  OMX_BUFFERHEADERTYPE  *psource_frame;
+  OMX_BUFFERHEADERTYPE  *pdest_frame;
+  bool secure_session;
+  int secure_color_format;
+  class omx_c2d_conv {
+  public:
+    omx_c2d_conv();
+    ~omx_c2d_conv();
+	bool init();
+	bool open(unsigned int height,unsigned int width,
+			  ColorConvertFormat src,
+			  ColorConvertFormat dest);
+	bool convert(int src_fd, void *src_viraddr,
+				 int dest_fd,void *dest_viraddr);
+	bool get_buffer_size(int port,unsigned int &buf_size);
+	int get_src_format();
+	void close();
+  private:
+     C2DColorConverterBase *c2dcc;
+    void *mLibHandle;
+	ColorConvertFormat src_format;
+    createC2DColorConverter_t *mConvertOpen;
+    destroyC2DColorConverter_t *mConvertClose;
+  };
+  omx_c2d_conv c2d_conv;
+#endif
 public:
   omx_video();  // constructor
   virtual ~omx_video();  // destructor
@@ -147,13 +207,22 @@ public:
   virtual OMX_U32 dev_start(void) = 0;
   virtual OMX_U32 dev_flush(unsigned) = 0;
   virtual OMX_U32 dev_resume(void) = 0;
-  virtual bool dev_use_buf(void *,unsigned) = 0;
+  virtual OMX_U32 dev_start_done(void) = 0;
+  virtual OMX_U32 dev_stop_done(void) = 0;
+  virtual bool dev_use_buf(void *,unsigned,unsigned) = 0;
   virtual bool dev_free_buf(void *,unsigned) = 0;
-  virtual bool dev_empty_buf(void *, void *) = 0;
-  virtual bool dev_fill_buf(void *buffer, void *) = 0;
+  virtual bool dev_empty_buf(void *, void *,unsigned,unsigned) = 0;
+  virtual bool dev_fill_buf(void *buffer, void *,unsigned,unsigned) = 0;
   virtual bool dev_get_buf_req(OMX_U32 *,OMX_U32 *,OMX_U32 *,OMX_U32) = 0;
-
-
+  virtual bool dev_get_seq_hdr(void *, unsigned, unsigned *) = 0;
+  virtual bool dev_loaded_start(void) = 0;
+  virtual bool dev_loaded_stop(void) = 0;
+  virtual bool dev_loaded_start_done(void) = 0;
+  virtual bool dev_loaded_stop_done(void) = 0;
+  virtual bool is_secure_session(void) = 0;
+#ifdef _ANDROID_ICS_
+  void omx_release_meta_buffer(OMX_BUFFERHEADERTYPE *buffer);
+#endif
   OMX_ERRORTYPE component_role_enum(
                                    OMX_HANDLETYPE hComp,
                                    OMX_U8 *role,
@@ -263,6 +332,11 @@ public:
   //int *output_pmem_fd;
   struct pmem *m_pInput_pmem;
   struct pmem *m_pOutput_pmem;
+#ifdef USE_ION
+  struct venc_ion *m_pInput_ion;
+  struct venc_ion *m_pOutput_ion;
+#endif
+
 
 
 public:
@@ -289,7 +363,9 @@ public:
     OMX_COMPONENT_OUTPUT_FLUSH_PENDING    =0x9,
     OMX_COMPONENT_INPUT_FLUSH_PENDING    =0xA,
     OMX_COMPONENT_PAUSE_PENDING          =0xB,
-    OMX_COMPONENT_EXECUTE_PENDING        =0xC
+    OMX_COMPONENT_EXECUTE_PENDING        =0xC,
+    OMX_COMPONENT_LOADED_START_PENDING = 0xD,
+    OMX_COMPONENT_LOADED_STOP_PENDING = 0xF,
 
   };
 
@@ -321,7 +397,8 @@ public:
     OMX_COMPONENT_GENERATE_PAUSE_DONE = 0xE,
     OMX_COMPONENT_GENERATE_RESUME_DONE = 0xF,
     OMX_COMPONENT_GENERATE_STOP_DONE = 0x10,
-    OMX_COMPONENT_GENERATE_HARDWARE_ERROR = 0x11
+    OMX_COMPONENT_GENERATE_HARDWARE_ERROR = 0x11,
+    OMX_COMPONENT_GENERATE_ETB_OPQ = 0x12
   };
 
   struct omx_event
@@ -359,7 +436,12 @@ public:
                                       OMX_U32              port,
                                       OMX_PTR              appData,
                                       OMX_U32              bytes);
-
+#ifdef _ANDROID_ICS_
+  OMX_ERRORTYPE allocate_input_meta_buffer(OMX_HANDLETYPE       hComp,
+                                      OMX_BUFFERHEADERTYPE **bufferHdr,
+                                      OMX_PTR              appData,
+                                      OMX_U32              bytes);
+#endif
   OMX_ERRORTYPE allocate_output_buffer(OMX_HANDLETYPE       hComp,
                                        OMX_BUFFERHEADERTYPE **bufferHdr,
                                        OMX_U32 port,OMX_PTR appData,
@@ -387,9 +469,15 @@ public:
 
   OMX_ERRORTYPE fill_buffer_done(OMX_HANDLETYPE hComp,
                                  OMX_BUFFERHEADERTYPE * buffer);
-  OMX_ERRORTYPE empty_this_buffer_proxy(OMX_HANDLETYPE       hComp,
+  OMX_ERRORTYPE empty_this_buffer_proxy(OMX_HANDLETYPE hComp,
                                         OMX_BUFFERHEADERTYPE *buffer);
-
+  OMX_ERRORTYPE empty_this_buffer_opaque(OMX_HANDLETYPE hComp,
+                                  OMX_BUFFERHEADERTYPE *buffer);
+  OMX_ERRORTYPE push_input_buffer(OMX_HANDLETYPE hComp);
+  OMX_ERRORTYPE convert_queue_buffer(OMX_HANDLETYPE hComp,
+     struct pmem &Input_pmem_info,unsigned &index);
+  OMX_ERRORTYPE queue_meta_buffer(OMX_HANDLETYPE hComp,
+     struct pmem &Input_pmem_info);
   OMX_ERRORTYPE fill_this_buffer_proxy(OMX_HANDLETYPE       hComp,
                                        OMX_BUFFERHEADERTYPE *buffer);
   bool release_done();
@@ -405,19 +493,18 @@ public:
                    unsigned int p2,
                    unsigned int id
                  );
-
+  OMX_ERRORTYPE get_supported_profile_level(OMX_VIDEO_PARAM_PROFILELEVELTYPE *profileLevelType);
   inline void omx_report_error ()
   {
-    m_state = OMX_StateInvalid;
-    if(m_pCallbacks.EventHandler)
+    if(m_pCallbacks.EventHandler && !m_error_propogated)
     {
+      m_error_propogated = true;
       m_pCallbacks.EventHandler(&m_cmp,m_app_data,
                                 OMX_EventError,OMX_ErrorHardware,0,NULL);
-      m_pCallbacks.EventHandler(&m_cmp,m_app_data,
-                                OMX_EventError, OMX_ErrorInvalidState,0, NULL);
     }
   }
 
+  void complete_pending_buffer_done_cbs();
 
   //*************************************************************
   //*******************MEMBER VARIABLES *************************
@@ -425,7 +512,7 @@ public:
 
   pthread_mutex_t       m_lock;
   sem_t                 m_cmd_lock;
-
+  bool              m_error_propogated;
 
   //sem to handle the minimum procesing of commands
 
@@ -461,14 +548,22 @@ public:
   OMX_CONFIG_INTRAREFRESHVOPTYPE m_sConfigIntraRefreshVOP;
   OMX_VIDEO_PARAM_QUANTIZATIONTYPE m_sSessionQuantization;
   OMX_VIDEO_PARAM_AVCSLICEFMO m_sAVCSliceFMO;
-
+  QOMX_VIDEO_INTRAPERIODTYPE m_sIntraperiod;
+  OMX_VIDEO_PARAM_ERRORCORRECTIONTYPE m_sErrorCorrection;
+  OMX_VIDEO_PARAM_INTRAREFRESHTYPE m_sIntraRefresh;
+  OMX_U32 m_sExtraData;
+  OMX_U32 m_sDebugSliceinfo;
+  OMX_U32 m_input_msg_id;
   // fill this buffer queue
   omx_cmd_queue         m_ftb_q;
   // Command Q for rest of the events
   omx_cmd_queue         m_cmd_q;
   omx_cmd_queue         m_etb_q;
+  omx_cmd_queue         m_opq_meta_q;
+  omx_cmd_queue         m_opq_pmem_q;
   // Input memory pointer
   OMX_BUFFERHEADERTYPE  *m_inp_mem_ptr;
+  OMX_BUFFERHEADERTYPE meta_buffer_hdr[MAX_NUM_INPUT_BUFFERS];
   // Output memory pointer
   OMX_BUFFERHEADERTYPE  *m_out_mem_ptr;
 
@@ -491,6 +586,14 @@ public:
   // to know whether Event Port Settings change has been triggered or not.
   bool m_event_port_settings_sent;
   OMX_U8                m_cRole[OMX_MAX_STRINGNAME_SIZE];
+  extra_data_handler extra_data_handle;
+
+private:
+#ifdef USE_ION
+  int alloc_map_ion_memory(int size,struct ion_allocation_data *alloc_data,
+                                    struct ion_fd_data *fd_data,int flag);
+  void free_ion_memory(struct venc_ion *buf_ion_info);
+#endif
 };
 
 #endif // __OMX_VIDEO_BASE_H__

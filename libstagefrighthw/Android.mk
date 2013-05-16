@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2010 The Android Open Source Project
+# Copyright (C) 2009 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,20 +14,17 @@
 # limitations under the License.
 #
 
-ifeq ($(TARGET_BOARD_PLATFORM),msm7x30)
-
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \
-    stagefright_surface_output_msm7x30.cpp \
     QComOMXPlugin.cpp                      \
-    QComHardwareRenderer.cpp
 
 LOCAL_CFLAGS := $(PV_CFLAGS_MINUS_VISIBILITY)
 
 LOCAL_C_INCLUDES:= \
-        $(TOP)/frameworks/base/include/media/stagefright/openmax
+        frameworks/native/include/media/openmax \
+        frameworks/native/include/media/hardware
 
 LOCAL_SHARED_LIBRARIES :=       \
         libbinder               \
@@ -35,10 +32,8 @@ LOCAL_SHARED_LIBRARIES :=       \
         libcutils               \
         libdl                   \
         libui                   \
-        libsurfaceflinger_client\
 
 LOCAL_MODULE := libstagefrighthw
 
 include $(BUILD_SHARED_LIBRARY)
 
-endif

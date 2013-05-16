@@ -18,25 +18,9 @@
 
 #include <dlfcn.h>
 
-#include <media/stagefright/HardwareAPI.h>
-#include <media/stagefright/MediaDebug.h>
+#include <media/hardware/HardwareAPI.h>
 
 namespace android {
-
-static const char kPrefix[] = "7x30.";
-
-static void AddPrefix(char *name) {
-    CHECK(!strncmp("OMX.qcom.", name, 9));
-    String8 tmp(name, 9);
-    tmp.append(kPrefix);
-    tmp.append(&name[9]);
-    strcpy(name, tmp.string());
-}
-
-static void RemovePrefix(const char *name, String8 *out) {
-    out->setTo(name, 9);  // "OMX.qcom."
-    out->append(&name[9 + strlen(kPrefix)]);
-}
 
 OMXPluginBase *createOMXPlugin() {
     return new QComOMXPlugin;
@@ -52,7 +36,7 @@ QComOMXPlugin::QComOMXPlugin()
       mGetRolesOfComponentHandle(NULL) {
     if (mLibHandle != NULL) {
         mInit = (InitFunc)dlsym(mLibHandle, "OMX_Init");
-        mDeinit = (DeinitFunc)dlsym(mLibHandle, "OMX_DeInit");
+        mDeinit = (DeinitFunc)dlsym(mLibHandle, "OMX_Deinit");
 
         mComponentNameEnum =
             (ComponentNameEnumFunc)dlsym(mLibHandle, "OMX_ComponentNameEnum");
@@ -86,10 +70,6 @@ OMX_ERRORTYPE QComOMXPlugin::makeComponentInstance(
         return OMX_ErrorUndefined;
     }
 
-    String8 tmp;
-    RemovePrefix(name, &tmp);
-    name = tmp.string();
-
     return (*mGetHandle)(
             reinterpret_cast<OMX_HANDLETYPE *>(component),
             const_cast<char *>(name),
@@ -113,15 +93,7 @@ OMX_ERRORTYPE QComOMXPlugin::enumerateComponents(
         return OMX_ErrorUndefined;
     }
 
-    OMX_ERRORTYPE res = (*mComponentNameEnum)(name, size, index);
-
-    if (res != OMX_ErrorNone) {
-        return res;
-    }
-
-    AddPrefix(name);
-
-    return OMX_ErrorNone;
+    return (*mComponentNameEnum)(name, size, index);
 }
 
 OMX_ERRORTYPE QComOMXPlugin::getRolesOfComponent(
@@ -132,10 +104,6 @@ OMX_ERRORTYPE QComOMXPlugin::getRolesOfComponent(
     if (mLibHandle == NULL) {
         return OMX_ErrorUndefined;
     }
-
-    String8 tmp;
-    RemovePrefix(name, &tmp);
-    name = tmp.string();
 
     OMX_U32 numRoles;
     OMX_ERRORTYPE err = (*mGetRolesOfComponentHandle)(
@@ -155,8 +123,13 @@ OMX_ERRORTYPE QComOMXPlugin::getRolesOfComponent(
         err = (*mGetRolesOfComponentHandle)(
                 const_cast<OMX_STRING>(name), &numRoles2, array);
 
-        CHECK_EQ(err, OMX_ErrorNone);
-        CHECK_EQ(numRoles, numRoles2);
+	if (err != OMX_ErrorNone) {
+	  return err;
+	}
+
+	if (numRoles2 != numRoles) {
+	  return err;
+	}
 
         for (OMX_U32 i = 0; i < numRoles; ++i) {
             String8 s((const char *)array[i]);
